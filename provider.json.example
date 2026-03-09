@@ -1,0 +1,12 @@
+{
+  "oci": {
+    "compartment_id": "ocid1.tenancy.oc1..aaaaaaaa...",
+    "region": "ap-hyderabad-1",
+    "subnet_id": "ocid1.subnet.oc1.ap-hyderabad-1.aaaaaaaa...",
+    "ocir_namespace": "ax2yzgp7isxi",
+    "availability_domain": "",
+    "dns_zone_name": "workspace.internal",
+    "dns_view_id": "ocid1.dnsview.oc1..aaaaaaaa...",
+    "external_url_template": "https://tdesai.editor-{workspace_hash}.oracle.com"
+  }
+}
