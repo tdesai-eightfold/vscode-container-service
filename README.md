@@ -44,7 +44,7 @@ container = Container(
 )
 
 # Get VPC (subnet)
-vpc = provider.get_or_create_vpc(subnet_id="ocid1.subnet...")
+vpc = provider.get_vpc(subnet_id="ocid1.subnet...")
 
 # Create instance (builds image_url from registry.base_url + image_name + tag)
 instance = provider.create_instance(container, "user1", vpc, registry, project_name="codeserver")
@@ -174,3 +174,16 @@ Replace `<gateway-public-ip>` with your nginx gateway's public IP (e.g. `68.233.
 ## Prerequisites
 
 - OCI: `~/.oci/config` configured, `pip install oci`
+
+## Troubleshooting
+
+- **API won't start / "provider.json not found"**  
+  Run from the repo root so the package can find `provider.json`:  
+  `cd v2-ubuntu-base-container && python -m vscode_container_manager.api`  
+  Or set `PYTHONPATH` and ensure `vscode_container_manager/provider.json` exists (copy from `provider.json.example`).
+
+- **"Provider init failed" / 500 on create or list**  
+  OCI provider needs `~/.oci/config` with a valid profile (e.g. `oci cli setup`). Ensure `compartment_id`, `region`, `subnet_id` in `provider.json` match your tenancy.
+
+- **Workspace create fails**  
+  For `/workspace/create`, `provider.json` must include `dns_zone_name` and `dns_view_id` (OCI private DNS view). Without them, DNS record creation fails.

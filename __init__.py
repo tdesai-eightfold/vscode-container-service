@@ -5,6 +5,7 @@ Switch providers by implementing CloudBaseClass.
 from .base import (
     CloudBaseClass,
     Container,
+    ContainerInstanceClient,
     InstanceInfo,
     RegistryInfo,
     VpcInfo,
@@ -13,7 +14,11 @@ from .base import (
 
 def get_provider(provider: str, **kwargs) -> CloudBaseClass:
     """Factory: return provider instance by name."""
-    if provider.lower() in ("oci", "oracle"):
+    p = provider.lower()
+    if p in ("oci", "oracle"):
         from .providers.oracle_oci import OracleCloudProvider  # requires: pip install oci
         return OracleCloudProvider(**kwargs)
-    raise ValueError(f"Unknown provider: {provider}. Supported: oci")
+    if p == "aws":
+        from .providers.aws_ecr import AWSECRProvider  # requires: pip install boto3
+        return AWSECRProvider(**kwargs)
+    raise ValueError(f"Unknown provider: {provider}. Supported: oci, aws")

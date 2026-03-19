@@ -13,65 +13,37 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from . import get_provider
-from .base import Container
 
 app = FastAPI(
     title="VSCode Container Manager API",
-    description="Cloud-agnostic create, destroy, list. Provider config from provider.json; pass provider name only.",
+    description="Cloud-agnostic workspace create/destroy (container + DNS), list, get. Provider config from provider.json.",
 )
 
 PROVIDER_JSON = Path(__file__).parent / "provider.json"
 
+
+@app.on_event("startup")
+def _startup_validate_config() -> None:
+    """Validate provider.json on startup so failures are visible immediately."""
+    if not PROVIDER_JSON.exists():
+        raise FileNotFoundError(
+            f"provider.json not found at {PROVIDER_JSON}. "
+            "Copy provider.json.example to provider.json and fill in your values."
+        )
+    try:
+        providers = _load_providers()
+        app.state._provider_names = list(providers.keys())
+    except Exception as e:
+        raise RuntimeError(f"Invalid provider.json: {e}") from e
+
 # In-memory job store for async create operations: job_id -> {status, result?, error?}
 _job_store: dict[str, dict[str, Any]] = {}
-
-
-def _run_create_instance_background(job_id: str, req: "CreateRequest") -> None:
-    """Run create_instance in background and update job store."""
-    def _create():
-        prov = _get_provider_instance(req.provider)
-        config = _get_provider_config(req.provider)
-        subnet_id = config.get("subnet_id") or getattr(prov, "_subnet_id", None)
-        if not subnet_id:
-            raise ValueError("subnet_id required in provider.json for this provider")
-        registry = prov.ensure_registry_repo(req.registry_repo_name or req.image_name)
-        container = Container(
-            name="code-server",
-            image_name=req.image_name,
-            tag=req.image_tag,
-            cpu=req.cpu,
-            memory_gb=req.memory_gb,
-            ports=req.ports,
-        )
-        vpc = prov.get_or_create_vpc(subnet_id=subnet_id)
-        instance = prov.create_instance(
-            container, req.instance_name, vpc, registry, project_name=req.project_name
-        )
-        return {
-            "status": "created",
-            "instance": {
-                "id": instance.id,
-                "name": instance.name,
-                "status": instance.status,
-                "url": instance.url,
-                "private_ip": instance.private_ip,
-                "provider": instance.provider,
-            },
-        }
-
-    try:
-        result = _create()
-        _job_store[job_id] = {"status": "completed", "result": result}
-    except Exception as e:
-        _job_store[job_id] = {"status": "failed", "error": str(e)}
 
 
 def _run_create_workspace_background(job_id: str, req: "CreateWorkspaceRequest") -> None:
     """Run create_workspace in background and update job store."""
     def _create():
         prov = _get_provider_instance(req.provider)
-        if not hasattr(prov, "create_workspace"):
-            raise ValueError(f"Provider {req.provider} does not support workspace creation with DNS")
         return prov.create_workspace(
             workspace_hash=req.workspace_hash,
             image=req.image,
@@ -123,19 +95,6 @@ def _get_provider_instance(provider: str):
 # Request schemas (provider only, no provider_config)
 # ---------------------------------------------------------------------------
 
-class CreateRequest(BaseModel):
-    """Request to create a container instance."""
-    provider: str = Field(..., description="Provider name (from provider.json)")
-    instance_name: str = Field(..., min_length=1, description="Unique instance name (e.g. user1, dev)")
-    image_name: str = Field(..., description="Container image name (e.g. code-server-base)")
-    image_tag: str = Field(default="latest", description="Image tag")
-    project_name: str = Field(default="codeserver", description="Project/prefix for display name")
-    cpu: float = Field(default=1.0, ge=0.25)
-    memory_gb: float = Field(default=2.0, ge=0.5)
-    ports: list[int] = Field(default=[80], description="Exposed ports")
-    registry_repo_name: Optional[str] = None  # If None, uses image_name
-
-
 class ListRequest(BaseModel):
     """Request to list container instances."""
     provider: str = Field(..., description="Provider name (from provider.json)")
@@ -165,6 +124,17 @@ class DestroyWorkspaceRequest(BaseModel):
 # Endpoints
 # ---------------------------------------------------------------------------
 
+@app.get("/")
+async def root() -> dict:
+    """Basic usage: provider config from provider.json; use /docs for API."""
+    return {
+        "service": "VSCode Container Manager API",
+        "docs": "/docs",
+        "health": "/health",
+        "providers": "/providers",
+    }
+
+
 @app.get("/providers", response_model=dict)
 async def list_providers() -> dict:
     """
@@ -175,26 +145,10 @@ async def list_providers() -> dict:
         # Return provider names only (no secrets)
         return {"providers": list(providers.keys())}
     except FileNotFoundError as e:
-        raise HTTPException(status_code=503, detail=str(e))
-
-
-@app.post("/create", response_model=dict)
-async def create_instance(req: CreateRequest, background_tasks: BackgroundTasks) -> dict:
-    """
-    Create a container instance. Returns immediately with job_id; creation runs in background.
-    Poll GET /status/{job_id} for result.
-    """
-    # Validate provider/config before starting background task
-    config = _get_provider_config(req.provider)
-    prov = _get_provider_instance(req.provider)
-    subnet_id = config.get("subnet_id") or getattr(prov, "_subnet_id", None)
-    if not subnet_id:
-        raise HTTPException(status_code=400, detail="subnet_id required in provider.json for this provider")
-
-    job_id = str(uuid.uuid4())
-    _job_store[job_id] = {"status": "creating"}
-    background_tasks.add_task(_run_create_instance_background, job_id, req)
-    return {"status": "creating", "job_id": job_id}
+        raise HTTPException(
+            status_code=503,
+            detail=f"{e}. Copy provider.json.example to provider.json and fill in values.",
+        )
 
 
 @app.post("/destroy", response_model=dict)
@@ -284,14 +238,6 @@ async def create_workspace(req: CreateWorkspaceRequest, background_tasks: Backgr
     Returns immediately with job_id; creation runs in background.
     Poll GET /status/{job_id} for result.
     """
-    # Validate provider supports workspace creation before starting background task
-    prov = _get_provider_instance(req.provider)
-    if not hasattr(prov, "create_workspace"):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Provider {req.provider} does not support workspace creation with DNS",
-        )
-
     job_id = str(uuid.uuid4())
     _job_store[job_id] = {"status": "creating"}
     background_tasks.add_task(_run_create_workspace_background, job_id, req)
@@ -305,11 +251,6 @@ async def destroy_workspace(req: DestroyWorkspaceRequest) -> dict:
     """
     def _destroy():
         prov = _get_provider_instance(req.provider)
-        if not hasattr(prov, "destroy_workspace"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Provider {req.provider} does not support workspace destruction",
-            )
         prov.destroy_workspace(workspace_hash=req.workspace_hash)
 
     try:

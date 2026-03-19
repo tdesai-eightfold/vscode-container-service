@@ -1,3 +1,4 @@
+boto3>=1.28.0
 oci>=2.100.0
 fastapi>=0.100.0
 uvicorn[standard]>=0.22.0
