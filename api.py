@@ -2,9 +2,11 @@
 """
 Cloud-agnostic API for container instance management.
 Provider config loaded from provider.json; requests only need provider name.
+Runs on HTTPS port 443 by default. Set SSL_CERTFILE and SSL_KEYFILE for TLS.
 """
 import asyncio
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -289,4 +291,15 @@ async def health() -> dict:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", "443"))
+    ssl_certfile = os.environ.get("SSL_CERTFILE")
+    ssl_keyfile = os.environ.get("SSL_KEYFILE")
+    use_ssl = (
+        ssl_certfile and ssl_keyfile
+        and Path(ssl_certfile).exists()
+        and Path(ssl_keyfile).exists()
+    )
+    if use_ssl:
+        uvicorn.run(app, host="0.0.0.0", port=port, ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+    else:
+        uvicorn.run(app, host="0.0.0.0", port=port)

@@ -48,13 +48,23 @@ def _task_to_instance_info(t: dict, container: Optional[Container] = None) -> In
 class AWSContainerInstanceClient(ContainerInstanceClient):
     """Minimal ECS Fargate implementation of ContainerInstanceClient."""
 
-    def __init__(self, ecs, cluster: str, task_definition: str, security_groups: list[str], ecr=None, execution_role_arn: Optional[str] = None):
+    def __init__(
+        self,
+        ecs,
+        cluster: str,
+        task_definition: str,
+        security_groups: list[str],
+        ecr=None,
+        execution_role_arn: Optional[str] = None,
+        task_role_arn: Optional[str] = None,
+    ):
         self._ecs = ecs
         self._cluster = cluster
         self._task_def = task_definition
         self._sgs = security_groups or []
         self._ecr = ecr
         self._execution_role_arn = execution_role_arn
+        self._task_role_arn = task_role_arn
 
     def create_instance(
         self,
@@ -64,13 +74,25 @@ class AWSContainerInstanceClient(ContainerInstanceClient):
         registry: RegistryInfo,
         project_name: str = "codeserver",
         task_definition_arn: Optional[str] = None,
+        extra_env: Optional[dict[str, str]] = None,
     ) -> InstanceInfo:
         task_def = task_definition_arn or self._task_def
+        env = [{"name": "CONTAINER_HASH", "value": instance_name}]
+        if extra_env:
+            env.extend([{"name": k, "value": str(v)} for k, v in extra_env.items()])
         r = self._ecs.run_task(
             cluster=self._cluster,
             taskDefinition=task_def,
             launchType="FARGATE",
             startedBy=instance_name,
+            overrides={
+                "containerOverrides": [
+                    {
+                        "name": container.name,
+                        "environment": env,
+                    }
+                ]
+            },
             networkConfiguration={
                 "awsvpcConfiguration": {
                     "subnets": [vpc.subnet_id],
@@ -123,7 +145,15 @@ class AWSContainerInstanceClient(ContainerInstanceClient):
         image_uri = registry.image_url(container.image_name, container.tag)
         cpu = max(256, min(4096, int(container.cpu * 1024)))
         memory = max(512, min(30720, int(container.memory_gb * 1024)))
-        canonical = {"image": image_uri, "cpu": cpu, "memory": memory, "name": container.name, "env": sorted((container.environment or {}).items()), "ports": sorted((container.ports or [80]))}
+        canonical = {
+            "image": image_uri,
+            "cpu": cpu,
+            "memory": memory,
+            "name": container.name,
+            "env": sorted((container.environment or {}).items()),
+            "ports": sorted((container.ports or [80])),
+            "task_role_arn": self._task_role_arn or "",
+        }
         if self._ecr:
             try:
                 r = self._ecr.describe_images(repositoryName=container.image_name, imageIds=[{"imageTag": container.tag}])
@@ -142,21 +172,24 @@ class AWSContainerInstanceClient(ContainerInstanceClient):
                 raise
         env = [{"name": k, "value": str(v)} for k, v in (container.environment or {}).items()]
         ports = container.ports or [80]
-        r = self._ecs.register_task_definition(
-            family=family,
-            networkMode="awsvpc",
-            requiresCompatibilities=["FARGATE"],
-            cpu=str(cpu),
-            memory=str(memory),
-            executionRoleArn=role_arn,
-            containerDefinitions=[{
+        register_kwargs: dict = {
+            "family": family,
+            "networkMode": "awsvpc",
+            "requiresCompatibilities": ["FARGATE"],
+            "cpu": str(cpu),
+            "memory": str(memory),
+            "executionRoleArn": role_arn,
+            "containerDefinitions": [{
                 "name": container.name,
                 "image": image_uri,
                 "essential": True,
                 "portMappings": [{"containerPort": p, "protocol": "tcp"} for p in ports],
                 "environment": env,
             }],
-        )
+        }
+        if self._task_role_arn:
+            register_kwargs["taskRoleArn"] = self._task_role_arn
+        r = self._ecs.register_task_definition(**register_kwargs)
         return r["taskDefinition"]["taskDefinitionArn"]
 
 
@@ -178,6 +211,8 @@ class AWSECRProvider(CloudBaseClass):
         private_hosted_zone_id: Optional[str] = None,
         dns_zone_name: Optional[str] = None,
         execution_role_arn: Optional[str] = None,
+        task_role_arn: Optional[str] = None,
+        s3_access_grants: Optional[dict] = None,
     ):
         """
         Initialize AWS provider with credentials.
@@ -203,6 +238,7 @@ class AWSECRProvider(CloudBaseClass):
         self._session = boto3.Session(**session_kwargs)
         self._ecr = self._session.client("ecr")
         self._ec2 = self._session.client("ec2")
+        self._s3_access_grants = s3_access_grants or {}
         self._subnet_id = subnet_id
         self._private_hosted_zone_id = private_hosted_zone_id
         self._dns_zone_name = (dns_zone_name or "workspace.internal").rstrip(".")
@@ -210,7 +246,13 @@ class AWSECRProvider(CloudBaseClass):
         self._container_instance_client: Optional[AWSContainerInstanceClient] = None
         if cluster and task_definition:
             self._container_instance_client = AWSContainerInstanceClient(
-                self._session.client("ecs"), cluster, task_definition, security_group_ids or [], ecr=self._ecr, execution_role_arn=execution_role_arn
+                self._session.client("ecs"),
+                cluster,
+                task_definition,
+                security_group_ids or [],
+                ecr=self._ecr,
+                execution_role_arn=execution_role_arn,
+                task_role_arn=task_role_arn,
             )
 
         if not self._account_id:
@@ -376,12 +418,19 @@ class AWSECRProvider(CloudBaseClass):
         vpc: VpcInfo,
         registry: RegistryInfo,
         project_name: str = "codeserver",
+        extra_env: Optional[dict[str, str]] = None,
         **kwargs: Any,
     ) -> InstanceInfo:
         if not self._container_instance_client:
             raise NotImplementedError("Set cluster and task_definition in provider config for create_instance")
         return self._container_instance_client.create_instance(
-            container, instance_name, vpc, registry, project_name=project_name, **kwargs
+            container,
+            instance_name,
+            vpc,
+            registry,
+            project_name=project_name,
+            extra_env=extra_env,
+            **kwargs,
         )
 
     def destroy_instance(self, instance_id: str) -> None:
@@ -460,6 +509,40 @@ class AWSECRProvider(CloudBaseClass):
             logger.exception("AWS Route 53 DNS delete failed: %s", e)
             raise
 
+    def _get_s3_access_grants_credentials(self, workspace_hash: str) -> Optional[dict[str, str]]:
+        """
+        Get temporary S3 Access Grants credentials scoped to hash-{workspace_hash}/*.
+        Returns dict with AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, or None if disabled.
+        """
+        cfg = self._s3_access_grants
+        if not cfg.get("enabled"):
+            return None
+        bucket = cfg.get("bucket")
+        prefix = (cfg.get("prefix") or "candidate-code").rstrip("/")
+        duration = int(cfg.get("credential_duration_seconds") or 10800)  # 3 hours default
+        account_id = self._account_id
+        if not bucket or not account_id:
+            return None
+        target = f"s3://{bucket}/{prefix}/hash-{workspace_hash}/*"
+        try:
+            s3control = self._session.client("s3control")
+            resp = s3control.get_data_access(
+                AccountId=account_id,
+                Target=target,
+                Permission="READWRITE",
+                Privilege="Minimal",
+                DurationSeconds=min(max(duration, 900), 43200),
+            )
+            creds = resp.get("Credentials") or {}
+            return {
+                "AWS_ACCESS_KEY_ID": creds.get("AccessKeyId", ""),
+                "AWS_SECRET_ACCESS_KEY": creds.get("SecretAccessKey", ""),
+                "AWS_SESSION_TOKEN": creds.get("SessionToken", ""),
+            }
+        except ClientError as e:
+            logger.exception("S3 Access Grants GetDataAccess failed for %s: %s", target, e)
+            return None
+
     def create_workspace(
         self,
         workspace_hash: str,
@@ -497,8 +580,23 @@ class AWSECRProvider(CloudBaseClass):
             )
         vpc = self.get_vpc()
         task_def_arn = self._container_instance_client.ensure_task_definition(container, registry)
+
+        extra_env: dict[str, str] = {}
+        if self._s3_access_grants.get("enabled"):
+            creds = self._get_s3_access_grants_credentials(workspace_hash)
+            if creds:
+                extra_env.update(creds)
+                extra_env["S3_WORKSPACE_BUCKET"] = self._s3_access_grants.get("bucket", "")
+                extra_env["S3_WORKSPACE_PREFIX"] = self._s3_access_grants.get("prefix", "candidate-code")
+
         instance = self.create_instance(
-            container, workspace_hash, vpc, registry, project_name=project_name, task_definition_arn=task_def_arn
+            container,
+            workspace_hash,
+            vpc,
+            registry,
+            project_name=project_name,
+            task_definition_arn=task_def_arn,
+            extra_env=extra_env or None,
         )
         private_ip = instance.private_ip or ""
         if not private_ip:

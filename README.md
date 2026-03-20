@@ -81,9 +81,16 @@ Provider config from `provider.json`; requests only need provider name.
 ```
 
 ```bash
-# Run API server
+# Run API server (HTTPS on 443 by default; requires root for port 443)
+# Set SSL_CERTFILE and SSL_KEYFILE for TLS, or use HTTP with PORT=8000 for dev
 cd v2-ubuntu-base-container && python -m vscode_container_manager.api
-# or: uvicorn vscode_container_manager.api:app --reload --port 8000
+
+# Dev: HTTP on 8000
+PORT=8000 python -m vscode_container_manager.api
+
+# HTTPS with certs
+SSL_CERTFILE=/path/to/cert.pem SSL_KEYFILE=/path/to/key.pem python -m vscode_container_manager.api
+# or: uvicorn vscode_container_manager.api:app --reload --port 443 --ssl-keyfile key.pem --ssl-certfile cert.pem
 ```
 
 | Endpoint | Method | Description |
@@ -99,7 +106,8 @@ cd v2-ubuntu-base-container && python -m vscode_container_manager.api
 
 **Example create:**
 ```bash
-curl -X POST http://localhost:8000/create -H "Content-Type: application/json" -d '{
+# Use https://localhost:443 for HTTPS, or http://localhost:8000 if PORT=8000
+curl -X POST https://localhost:443/create -k -H "Content-Type: application/json" -d '{
   "provider": "oci",
   "instance_name": "user1",
   "image_name": "code-server-base",
@@ -109,12 +117,12 @@ curl -X POST http://localhost:8000/create -H "Content-Type: application/json" -d
 
 **Example list:**
 ```bash
-curl -X POST http://localhost:8000/instances -H "Content-Type: application/json" -d '{"provider": "oci"}'
+curl -X POST https://localhost:443/instances -k -H "Content-Type: application/json" -d '{"provider": "oci"}'
 ```
 
 **Example destroy:**
 ```bash
-curl -X POST http://localhost:8000/destroy -H "Content-Type: application/json" -d '{
+curl -X POST https://localhost:443/destroy -k -H "Content-Type: application/json" -d '{
   "instance_id": "ocid1.computecontainerinstance...",
   "provider": "oci"
 }'
@@ -126,7 +134,7 @@ Creates container with DNS record `{workspace_hash}.workspace.internal` → priv
 
 **Create workspace:**
 ```bash
-curl -X POST http://localhost:8000/workspace/create -H "Content-Type: application/json" -d '{
+curl -X POST https://localhost:443/workspace/create -k -H "Content-Type: application/json" -d '{
   "provider": "oci",
   "workspace_hash": "a92f13",
   "image": "codercom/code-server:latest",
@@ -151,7 +159,7 @@ The gateway routes `http://<gateway-ip>/<workspace_hash>` → `http://<hash>.wor
 
 **Destroy workspace:** (deletes DNS record, then container)
 ```bash
-curl -X POST http://localhost:8000/workspace/destroy -H "Content-Type: application/json" -d '{
+curl -X POST https://localhost:443/workspace/destroy -k -H "Content-Type: application/json" -d '{
   "provider": "oci",
   "workspace_hash": "a92f13"
 }'
