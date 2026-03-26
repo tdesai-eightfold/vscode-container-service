@@ -1,6 +1,6 @@
 """
 AWS (ECR + ECS) provider implementation.
-Supports: init, credentials, ensure_registry_repo, push_image, get_vpc, ECS Fargate lifecycle.
+Supports: init, credentials, ensure_registry_repo, push_image, get_vpc (subnet from config only), ECS Fargate lifecycle.
 """
 import base64
 import hashlib
@@ -237,7 +237,6 @@ class AWSECRProvider(CloudBaseClass):
 
         self._session = boto3.Session(**session_kwargs)
         self._ecr = self._session.client("ecr")
-        self._ec2 = self._session.client("ec2")
         self._s3_access_grants = s3_access_grants or {}
         self._subnet_id = subnet_id
         self._private_hosted_zone_id = private_hosted_zone_id
@@ -385,7 +384,8 @@ class AWSECRProvider(CloudBaseClass):
 
     def get_vpc(self, subnet_id: Optional[str] = None) -> VpcInfo:
         """
-        Get VPC info for the given subnet. Does not create VPC/subnet; subnet_id is required.
+        Build placement info from configured subnet_id only (no EC2 DescribeSubnets call).
+        ECS RunTask validates the subnet when the task is scheduled.
         """
         sid = subnet_id or self._subnet_id
         if not sid:
@@ -393,23 +393,7 @@ class AWSECRProvider(CloudBaseClass):
                 "subnet_id required. Create a VPC and subnet on the provider (AWS Console or CLI) "
                 "and set subnet_id in provider.json."
             )
-        try:
-            resp = self._ec2.describe_subnets(SubnetIds=[sid])
-            subnets = resp.get("Subnets") or []
-            if not subnets:
-                raise ValueError(f"Subnet not found: {sid}")
-            sub = subnets[0]
-            return VpcInfo(
-                subnet_id=sub["SubnetId"],
-                vpc_id=sub.get("VpcId"),
-                region=self._region,
-            )
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "InvalidSubnetID.NotFound":
-                raise ValueError(
-                    f"Subnet not found: {sid}. Create a VPC and subnet on the provider and set subnet_id in provider.json."
-                ) from e
-            raise
+        return VpcInfo(subnet_id=sid, vpc_id=None, region=self._region)
 
     def create_instance(
         self,
