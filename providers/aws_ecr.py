@@ -57,8 +57,8 @@ class AWSContainerInstanceClient(ContainerInstanceClient):
         ecr=None,
         execution_role_arn: Optional[str] = None,
         task_role_arn: Optional[str] = None,
-        logs=None,
-        region: str = "us-east-1",
+        cloudwatch_log_group: Optional[str] = None,
+        cloudwatch_log_region: str = "us-east-1",
     ):
         self._ecs = ecs
         self._cluster = cluster
@@ -67,8 +67,8 @@ class AWSContainerInstanceClient(ContainerInstanceClient):
         self._ecr = ecr
         self._execution_role_arn = execution_role_arn
         self._task_role_arn = task_role_arn
-        self._logs = logs
-        self._region = region
+        self._cloudwatch_log_group = cloudwatch_log_group
+        self._cloudwatch_log_region = cloudwatch_log_region
 
     def create_instance(
         self,
@@ -101,7 +101,7 @@ class AWSContainerInstanceClient(ContainerInstanceClient):
                 "awsvpcConfiguration": {
                     "subnets": [vpc.subnet_id],
                     "securityGroups": self._sgs,
-                    "assignPublicIp": "DISABLED",
+                    "assignPublicIp": "ENABLED",
                 }
             },
         )
@@ -176,22 +176,22 @@ class AWSContainerInstanceClient(ContainerInstanceClient):
                 raise
         env = [{"name": k, "value": str(v)} for k, v in (container.environment or {}).items()]
         ports = container.ports or [80]
-        log_group = f"/ecs/{family}"
-        if self._logs:
-            try:
-                self._logs.create_log_group(logGroupName=log_group)
-                self._logs.put_retention_policy(logGroupName=log_group, retentionInDays=7)
-                logger.info("Created CloudWatch log group: %s", log_group)
-            except self._logs.exceptions.ResourceAlreadyExistsException:
-                pass
-        log_configuration = {
-            "logDriver": "awslogs",
-            "options": {
-                "awslogs-group": log_group,
-                "awslogs-region": self._region,
-                "awslogs-stream-prefix": "ecs",
-            },
+        container_definition: dict = {
+            "name": container.name,
+            "image": image_uri,
+            "essential": True,
+            "portMappings": [{"containerPort": p, "protocol": "tcp"} for p in ports],
+            "environment": env,
         }
+        if self._cloudwatch_log_group:
+            container_definition["logConfiguration"] = {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": self._cloudwatch_log_group,
+                    "awslogs-region": self._cloudwatch_log_region,
+                    "awslogs-stream-prefix": family,
+                },
+            }
         register_kwargs: dict = {
             "family": family,
             "networkMode": "awsvpc",
@@ -199,14 +199,7 @@ class AWSContainerInstanceClient(ContainerInstanceClient):
             "cpu": str(cpu),
             "memory": str(memory),
             "executionRoleArn": role_arn,
-            "containerDefinitions": [{
-                "name": container.name,
-                "image": image_uri,
-                "essential": True,
-                "portMappings": [{"containerPort": p, "protocol": "tcp"} for p in ports],
-                "environment": env,
-                "logConfiguration": log_configuration,
-            }],
+            "containerDefinitions": [container_definition],
         }
         if self._task_role_arn:
             register_kwargs["taskRoleArn"] = self._task_role_arn
@@ -234,6 +227,7 @@ class AWSECRProvider(CloudBaseClass):
         execution_role_arn: Optional[str] = None,
         task_role_arn: Optional[str] = None,
         s3_access_grants: Optional[dict] = None,
+        cloudwatch_log_group: Optional[str] = None,
     ):
         """
         Initialize AWS provider with credentials.
@@ -273,8 +267,8 @@ class AWSECRProvider(CloudBaseClass):
                 ecr=self._ecr,
                 execution_role_arn=execution_role_arn,
                 task_role_arn=task_role_arn,
-                logs=self._session.client("logs"),
-                region=region,
+                cloudwatch_log_group=cloudwatch_log_group,
+                cloudwatch_log_region=region,
             )
 
         if not self._account_id:
