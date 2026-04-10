@@ -510,9 +510,13 @@ class AWSECRProvider(CloudBaseClass):
             logger.exception("AWS Route 53 DNS delete failed: %s", e)
             raise
 
-    def _get_s3_access_grants_credentials(self, workspace_hash: str) -> Optional[dict[str, str]]:
+    def _get_s3_access_grants_credentials(
+        self,
+        workspace_hash: str,
+        group_id: str = "eightfold-demo",
+    ) -> Optional[dict[str, str]]:
         """
-        Get temporary S3 Access Grants credentials scoped to hash-{workspace_hash}/*.
+        Get temporary S3 Access Grants credentials scoped to hash-{group_id}/{workspace_hash}/*.
         Returns dict with AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, or None if disabled.
         """
         cfg = self._s3_access_grants
@@ -524,7 +528,7 @@ class AWSECRProvider(CloudBaseClass):
         account_id = self._account_id
         if not bucket or not account_id:
             return None
-        target = f"s3://{bucket}/{prefix}/hash-{workspace_hash}/*"
+        target = f"s3://{bucket}/{prefix}/hash-{group_id}/{workspace_hash}/*"
         try:
             s3control = self._session.client("s3control")
             resp = s3control.get_data_access(
@@ -550,6 +554,7 @@ class AWSECRProvider(CloudBaseClass):
         image: str,
         port: int = 8080,
         project_name: str = "codeserver",
+        group_id: str = "eightfold-demo",
     ) -> dict:
         """Create workspace: container + DNS (same pattern as OCI). Uses workspace_hash as instance name and DNS label."""
         if not self._container_instance_client:
@@ -584,11 +589,12 @@ class AWSECRProvider(CloudBaseClass):
 
         extra_env: dict[str, str] = {}
         if self._s3_access_grants.get("enabled"):
-            creds = self._get_s3_access_grants_credentials(workspace_hash)
+            creds = self._get_s3_access_grants_credentials(workspace_hash, group_id=group_id)
             if creds:
                 extra_env.update(creds)
                 extra_env["S3_WORKSPACE_BUCKET"] = self._s3_access_grants.get("bucket", "")
-                extra_env["S3_WORKSPACE_PREFIX"] = self._s3_access_grants.get("prefix", "candidate-code")
+                s3_prefix = (self._s3_access_grants.get("prefix") or "candidate-code").rstrip("/")
+                extra_env["S3_WORKSPACE_PREFIX"] = f"{s3_prefix}/hash-{group_id}"
 
         instance = self.create_instance(
             container,

@@ -50,6 +50,7 @@ def _run_create_workspace_background(job_id: str, req: "CreateWorkspaceRequest")
             workspace_hash=req.workspace_hash,
             image=req.image,
             port=req.port,
+            group_id=req.group_id,
         )
 
     try:
@@ -114,6 +115,7 @@ class CreateWorkspaceRequest(BaseModel):
     workspace_hash: str = Field(..., min_length=1, description="Short identifier (e.g. a92f13)")
     image: str = Field(..., description="Container image (e.g. codercom/code-server:latest)")
     port: int = Field(default=8080, description="Container port")
+    group_id: str = Field(default="eightfold-demo", description="Group ID for S3 Access Grants scope (default: eightfold-demo)")
 
 
 class DestroyWorkspaceRequest(BaseModel):
