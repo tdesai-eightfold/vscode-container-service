@@ -6,7 +6,10 @@ Runs on HTTPS port 443 by default. Set SSL_CERTFILE and SSL_KEYFILE for TLS.
 """
 import asyncio
 import json
+import logging
 import os
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -15,6 +18,13 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from . import get_provider
+
+logger = logging.getLogger(__name__)
+
+# OpenAI proxy admin (per-IP token usage); reset when a workspace is destroyed.
+TOOLS_EDITOR_BASE_URL = os.environ.get(
+    "TOOLS_EDITOR_BASE_URL", "https://tools-editor.eightfold.ai:1234"
+).rstrip("/")
 
 app = FastAPI(
     title="VSCode Container Manager API",
@@ -92,6 +102,61 @@ def _get_provider_instance(provider: str):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Provider init failed: {e}")
+
+
+def _workspace_container_private_ip(provider: str, workspace_hash: str) -> Optional[str]:
+    """
+    Resolve private IP for a workspace using the same name matching as destroy_workspace
+    (AWS: instance name == workspace_hash; OCI: codeserver-{workspace_hash}).
+    """
+    prov = _get_provider_instance(provider)
+    config = _get_provider_config(provider)
+    filter_val = config.get("compartment_id")
+    instances = prov.list_instances(compartment_or_project=filter_val)
+    expected_oci = f"codeserver-{workspace_hash}"
+    for inst in instances:
+        name = inst.name or ""
+        if name == workspace_hash or name == expected_oci or expected_oci in name:
+            return inst.private_ip
+    return None
+
+
+def _reset_tools_editor_usage_for_ip(client_ip: str) -> None:
+    """POST /admin/usage/reset on tools-editor (OpenAI proxy). Best-effort; logs on failure."""
+    url = f"{TOOLS_EDITOR_BASE_URL}/admin/usage/reset"
+    payload = json.dumps({"ip": client_ip}).encode("utf-8")
+    request_obj = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request_obj, timeout=30) as response:
+            if response.status != 200:
+                logger.warning(
+                    "tools-editor usage reset returned HTTP %s for ip=%s",
+                    response.status,
+                    client_ip,
+                )
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            logger.info(
+                "tools-editor usage reset: no usage row for ip=%s (404)",
+                client_ip,
+            )
+        else:
+            logger.warning(
+                "tools-editor usage reset failed for ip=%s: HTTP %s",
+                client_ip,
+                exc.code,
+            )
+    except Exception as exc:
+        logger.warning(
+            "tools-editor usage reset failed for ip=%s: %s",
+            client_ip,
+            exc,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -252,10 +317,16 @@ async def create_workspace(req: CreateWorkspaceRequest, background_tasks: Backgr
 async def destroy_workspace(req: DestroyWorkspaceRequest) -> dict:
     """
     Destroy workspace: delete DNS record, then delete container.
+    Also resets OpenAI proxy token usage for the workspace container IP on tools-editor.
     """
     def _destroy():
+        private_ip = _workspace_container_private_ip(
+            req.provider, req.workspace_hash
+        )
         prov = _get_provider_instance(req.provider)
         prov.destroy_workspace(workspace_hash=req.workspace_hash)
+        if private_ip:
+            _reset_tools_editor_usage_for_ip(private_ip)
 
     try:
         await asyncio.to_thread(_destroy)
