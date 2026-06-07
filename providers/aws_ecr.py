@@ -548,6 +548,31 @@ class AWSECRProvider(CloudBaseClass):
             logger.exception("S3 Access Grants GetDataAccess failed for %s: %s", target, e)
             return None
 
+    def refresh_s3_credentials(
+        self,
+        workspace_hash: str,
+        group_id: str = "eightfold-demo",
+    ) -> dict[str, str]:
+        """
+        Issue a fresh set of S3 Access Grants credentials for the given workspace.
+        Raises ValueError if S3 Access Grants is not enabled or required config is missing.
+        Raises RuntimeError if the credential issuance call fails.
+        """
+        if not self._s3_access_grants.get("enabled"):
+            raise ValueError("S3 Access Grants not enabled for this provider")
+        creds = self._get_s3_access_grants_credentials(workspace_hash, group_id=group_id)
+        if not creds:
+            raise RuntimeError(
+                "Failed to issue S3 Access Grants credentials; check provider logs"
+            )
+        bucket = self._s3_access_grants.get("bucket", "")
+        s3_prefix = (self._s3_access_grants.get("prefix") or "candidate-code").rstrip("/")
+        return {
+            **creds,
+            "S3_WORKSPACE_BUCKET": bucket,
+            "S3_WORKSPACE_PREFIX": f"{s3_prefix}/hash-{group_id}",
+        }
+
     def create_workspace(
         self,
         workspace_hash: str,

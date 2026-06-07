@@ -189,6 +189,13 @@ class DestroyWorkspaceRequest(BaseModel):
     workspace_hash: str = Field(..., min_length=1, description="Workspace hash to destroy")
 
 
+class RefreshS3TokensRequest(BaseModel):
+    """Request to refresh S3 Access Grants credentials for a workspace."""
+    provider: str = Field(..., description="Provider name (from provider.json)")
+    workspace_hash: str = Field(..., min_length=1, description="Workspace hash to scope credentials to")
+    group_id: str = Field(default="eightfold-demo", description="Group ID for S3 Access Grants scope")
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -333,6 +340,44 @@ async def destroy_workspace(req: DestroyWorkspaceRequest) -> dict:
         return {"status": "destroyed", "workspace_hash": req.workspace_hash}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/workspace/refresh-s3-tokens", response_model=dict)
+async def refresh_s3_tokens(req: RefreshS3TokensRequest) -> dict:
+    """
+    Issue a fresh set of temporary S3 Access Grants credentials for the given workspace.
+    Returns AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN scoped to
+    hash-{group_id}/{workspace_hash}/*, plus the bucket and prefix.
+    """
+    def _refresh():
+        prov = _get_provider_instance(req.provider)
+        if not hasattr(prov, "refresh_s3_credentials"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Provider '{req.provider}' does not support S3 token refresh",
+            )
+        try:
+            return prov.refresh_s3_credentials(
+                workspace_hash=req.workspace_hash,
+                group_id=req.group_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+
+    try:
+        credentials = await asyncio.to_thread(_refresh)
+        return {
+            "status": "ok",
+            "workspace_hash": req.workspace_hash,
+            "group_id": req.group_id,
+            "credentials": credentials,
+        }
     except HTTPException:
         raise
     except Exception as e:
